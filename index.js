@@ -1,46 +1,84 @@
+// HTTP/HTTPS 代理
+
 var net = require('net');
 
-var srvip = process.env.OPENSHIFT_NODEJS_IP || "0.0.0.0";
-var srvport = process.env.OPENSHIFT_NODEJS_PORT || 8080;
+var srvIp = process.env.OPENSHIFT_NODEJS_IP || "0.0.0.0";
+var srvPort = process.env.OPENSHIFT_NODEJS_PORT || 8080;
 
 // 解析请求头
 function parseReq (buffer, e) {
-	var i, j, s, typ;
+	var i, j, k;
+	var o = false;
 	var txt = buffer.slice(0, e).toString("utf8");
+	// console.log(txt);
 
-	if (txt.substr(0, 8) === "CONNECT ") {
+	if (txt.substring(0, 8) === "CONNECT ") {
 		i = 8;
-		j = txt.indexOf(" ", i);
-		typ = "https";
+		j = txt.indexOf(":", i);
+		k = txt.indexOf(" ", j + 1);
+		o = {
+			host: txt.substring(i, j),
+			port: txt.substring(j + 1, k) - 0,
+			typ: "https",
+			buf: new Buffer("HTTP/1.1 200 Connection established\r\nConnection: close\r\n\r\n")
+		};
 	} else {
-		typ = "http";
 		i = txt.indexOf("\r\nHost:");
-		if (txt[i-1] === "1") {
-			console.log(txt.substr(i-8, 8)); // ...........
-		}
-		i += 6;
-		if (i === -1) {
-			return null;
-		}
-		while (txt[i] === " ") {
-			i ++;
-		}
-		j = txt.indexOf("\r\n", i);
-	}
-	if (j === -1) {
-		s = txt.substring(i);
-	} else {
-		s = txt.substring(i, j);
-	}
-	// console.log([s]);
+		if (i !== -1) {
+			var s1 = txt.substring(0, i);
+			var s, s2;
+			o = {
+				typ: "http"
+			};
 
-	i = s.split(":");
-	return {
-		host: i[0],
-		port: (i[1] - 0) || 80,
-		typ: typ
-	};
-};
+			// 替换网址格式(去掉域名部分)
+			if (txt[i-1] === "1") {
+				j = s1.indexOf("http://");
+				if (j > 0) {
+					k = s1.indexOf ("/", (j + 7));
+					s1 = txt.substr(0, j) + s1.substr(k);
+				}
+			}
+
+			// 抓取域名部分
+			i += 7;
+			while (txt[i] === " ") {
+				i ++;
+			}
+			j = txt.indexOf("\r\n", i);
+			if (j === -1) {
+				s = txt.substring(i);
+				s2 = "";
+			} else {
+				s = txt.substring(i, j);
+
+				// 替换connection头
+				s2 = txt.substring(j)
+					.replace(/(Proxy\-)?Connection\:.+\r\n/ig,"")
+					.replace(/Keep\-Alive\:.+\r\n/i,"");
+			}
+
+			// 解析域名和端口
+			k = s.indexOf(":");
+			if (k === -1) {
+				o.host = s;
+				o.port = 80;
+			} else {
+				o.host = s.substring(0, k);
+				o.port = (s.substring(k + 1) - 0);
+			}
+
+			// 替换buffer
+			o.buf = bufferAdd (
+				new Buffer(s1 + "\r\nHost: " + s + s2 + "\r\nConnection: close"),
+				buffer.slice(e)
+			);
+		}
+	}
+
+	// console.log ("------- " + o.host + ":" + o.port + "\n" + o.buf.toString());
+	return o;
+}
 
 // 从缓存中找到头部结束标记("\r\n\r\n")的位置
 function bufferEnd(b)
@@ -50,71 +88,57 @@ function bufferEnd(b)
 	for(; i < len; i ++)
 	{
 		if (b[i] == 0x0d && b[i+1] == 0x0a && b[i+2] == 0x0d && b[i+3] == 0x0a) {
-			return i+4;
+			return i;
 		}
 	}
 	return -1;
 }
 
+// 两个buffer对象加起来
+function bufferAdd(buf1,buf2)
+{
+	var re = new Buffer(buf1.length + buf2.length);
+	buf1.copy(re);
+	buf2.copy(re,buf1.length);
+	return re;
+}
+
+// 开启服务
 net.createServer(function(client) {
 	var buffer = new Buffer (0);
 
+	client.on("error", function () {});
 	client.on("data", function (data) {
-		buffer = buffer.concat(data);
+		buffer = bufferAdd(buffer, data);
 		var e = bufferEnd(buffer);
 		if (e > 0) {
 			var req = parseReq(buffer, e);
 			if (req === false) return;
-			client.removeAllListeners('data');
-			relay_connection(req);
+			client.removeAllListeners("data");
+			rc(req);
 		}
 	});
 
-	// client.on("end", function () {
-	// 	console.log("--- 本地 END!");
-	// });
-    // client.on("close", function(data) {
-    //     console.log("--- Closed!");
-    // });
-	// client.on("error", function () {
-	// 	console.log("--- Err!");
-	// });
-
 	//从http请求头部取得请求信息后，继续监听浏览器发送数据，同时连接目标服务器，并把目标服务器的数据传给浏览器
-	function relay_connection(req)
-	{
-		// console.log(req.method+' '+req.host+':'+req.port);
-
-		//如果请求不是CONNECT方法（GET, POST），那么替换掉头部的一些东西
-		if (req.method != 'CONNECT')
-		{
-			//先从buffer中取出头部
-			var _body_pos = buffer_find_body(buffer);
-			if (_body_pos < 0) _body_pos = buffer.length;
-			var header = buffer.slice(0,_body_pos).toString('utf8');
-			//替换connection头
-			header = header.replace(/(proxy\-)?connection\:.+\r\n/ig,'')
-					.replace(/Keep\-Alive\:.+\r\n/i,'')
-					.replace("\r\n",'\r\nConnection: close\r\n');
-			//替换网址格式(去掉域名部分)
-			if (req.httpVersion == '1.1')
-			{
-				var url = req.path.replace(/http\:\/\/[^\/]+/,'');
-				if (url.path != url) header = header.replace(req.path,url);
-			}
-			buffer = buffer_add(new Buffer(header,'utf8'),buffer.slice(_body_pos));
-		}
-
+	function rc(req) {
 		//建立到目标服务器的连接
-		var server = net.createConnection(req.port,req.host);
+		var server = net.createConnection(req.port, req.host);
+
 		//交换服务器与浏览器的数据
 		client.on("data", function(data){ server.write(data); });
 		server.on("data", function(data){ client.write(data); });
+		client.on("end", function () { server.end(); });
+		server.on("end", function () { client.end(); });
+		server.on("error", function () {});
 
-		if (req.method == 'CONNECT')
-			client.write(new Buffer("HTTP/1.1 200 Connection established\r\nConnection: close\r\n\r\n"));
-		else
-			server.write(buffer);
+		switch (req.typ) {
+			case "http":
+				server.write(req.buf);
+				break;
+			case "https":
+				client.write(req.buf);
+				break;
+		}
 	}
-
-}).listen(srvport, srvip);
+}).listen(srvPort, srvIp);
+console.log("LZRproxy start " + srvIp + ":" + srvPort);
