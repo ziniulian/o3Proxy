@@ -1,4 +1,4 @@
-// HTTP/HTTPS 代理
+// HTTP/HTTPS 间接代理
 
 // LZR 模块加载
 require("lzr");
@@ -15,14 +15,12 @@ var srvIp = process.env.OPENSHIFT_NODEJS_IP || "0.0.0.0";
 var srvPort = process.env.OPENSHIFT_NODEJS_PORT || 8081;
 var remoteProxyPort = 80;
 var remoteProxyFunHttp = "POST /ptth";		// http请求
-var remoteProxyFunHttps = "POST /ptths";		// https请求
-var remoteProxyFunHttpsDat = "POST /ptthsDat/";	// https数据交互
+var remoteProxyFunHttps = "POST /ptths/";	// https数据交互
 
-// var remoteProxyIp = "srv-lzrwebp.193b.starter-ca-central-1.openshiftapps.com";
-var remoteProxyIp = "127.0.0.1";	// 测试用
+var remoteProxyIp = "srv-lzrwebp.193b.starter-ca-central-1.openshiftapps.com";
+// var remoteProxyIp = "127.0.0.1";	// 测试用
 
 var streq = " HTTP/1.1\r\nHost: " + remoteProxyIp +
-"\r\nContent-Type: application/x-www-form-urlencoded" +
 "\r\nContent-Length: ";
 
 // 解析请求头
@@ -86,7 +84,7 @@ function parseReq (buf, e) {
 
 			// 替换buffer
 			o.buf = Buffer.concat([
-				Buffer.from(s1 + "\r\nHost: " + s + s2 + "\r\nConnection: close"),
+				new Buffer(s1 + "\r\nHost: " + s + s2 + "\r\nConnection: close"),
 				buf.slice(e)
 			]);
 		}
@@ -100,63 +98,115 @@ function parseReq (buf, e) {
 function rc(req, client) {
 	//建立到目标服务器的连接
 	var remoteProxy = net.createConnection(remoteProxyPort, remoteProxyIp);
-	var st = { t: 0, ts: null };
-	var o = Buffer.from("{\"h\":\"" + encodeURIComponent(req.host) + "\",\"p\":" + req.port + "}");
+	var buf = new Buffer(0);
+	var o = "{\"h\":\"" + req.host + "\",\"p\":" + req.port;
 
 	client.on("end", function() {
 		remoteProxy.end();
-console.log(req.host + ":" + req.port + " c - end");
+// console.log(req.host + ":" + req.port + " c - end");
 	});
-	remoteProxy.on("error", function (e) {});
+	remoteProxy.on("error", function (e) {
+		remoteProxy.end();
+		client.end();
+// console.log(req.host + ":" + req.port + " s - err");
+	});
 
 	if (req.buf) {
 		// HTTP
-		remoteProxy.on("data", function(d) {
-			// 需确认不发送 Content-Length 接收到的多次应答，是否每次都要 HTTP 头才能够通过 openshift 的监控
-			// getHttpDat(d, st, client);
-console.log(req.host + ":" + req.port + " <<---- " + d.length);
+		var b = false;
+		remoteProxy.on("data", function(dat) {
+			if (b) {
+				client.write(dat);
+			} else {
+				buf = Buffer.concat([buf, dat]);
+				var e = buf.indexOf("\r\n\r\n\t<w*p>\t");
+				if (e > 0) {
+// console.log(buf.slice(0, e).toString());
+					b = true;
+					client.write(buf.slice(e + 11));
+				}
+			}
+// console.log(req.host + ":" + req.port + " <<---- " + dat.length);
 		});
-		client.on("data", function(d) {
+		client.on("data", function(dat) {
 			client.end();
-console.log(req.host + ":" + req.port + " >> 服务端已关闭连接，不能再次发送请求。");
+// console.log(req.host + ":" + req.port + " >> 服务端已关闭连接，不能再次发送请求。");
 		});
 		remoteProxy.on("end", function() {
 			client.end();
-console.log(req.host + ":" + req.port + " s - end");
+// console.log(req.host + ":" + req.port + " s - end");
 		});
+
+		o += "}";
 		remoteProxy.write(Buffer.concat([
-			Buffer.from(remoteProxyFunHttp + streq + o.length + "\r\n\r\n"),
-			o, req.buf
+			new Buffer(remoteProxyFunHttp + streq + (o.length + req.buf.length) + "\r\n\r\n" + o),
+			req.buf
 		]));
 	} else {
 		// HTTPS
-		var key = 0;
-		remoteProxy.on("data", function(d) {
-			// 获取 key ...
-			client.write(Buffer.from("HTTP/1.1 200 Connection established\r\nConnection: close\r\n\r\n"));
-			remoteProxy.end();
-console.log(req.host + ":" + req.port + " <<---- https 连接OK" + d.length);
+		var key = "";
+		var id = 0;
+		remoteProxy.on("data", function(dat) {
+			buf = Buffer.concat([buf, dat]);
+			var e = buf.indexOf("\r\n\r\n");
+			if (e > 0) {
+				key = buf.slice(e + 4).toString();
+				remoteProxy.end();
+				client.write(new Buffer("HTTP/1.1 200 Connection established\r\nConnection: close\r\n\r\n"));
+			}
+// console.log(req.host + ":" + req.port + " <<---- https 连接OK , " + key);
 		});
-		client.on("data", function(d) {
-			// 重建连接，发送数据 ...
-console.log(req.host + ":" + req.port + " >> " + d.length);
+		client.on("data", function(dat) {
+			rcs(dat, key, id, client);
+// console.log(key + "-" + id + ": >> " + dat.length);
+			id ++;
 		});
-		remoteProxy.write(Buffer.concat([
-			Buffer.from(remoteProxyFunHttps + streq + o.length + "\r\n\r\n"),
-			o, req.buf
-		]));
-	}
 
+		o += ",\"k\":1}";
+		remoteProxy.write(new Buffer(remoteProxyFunHttp + streq + o.length + "\r\n\r\n" + o));
+	}
+}
+
+// https 数据处理
+function rcs(dat, key, id, client) {
+	var remoteProxy = net.createConnection(remoteProxyPort, remoteProxyIp);
+	var buf = new Buffer(0);
+	var b = false;
+
+	remoteProxy.on("data", function(dat) {
+		if (b) {
+			client.write(dat);
+		} else {
+			buf = Buffer.concat([buf, dat]);
+			var e = buf.indexOf("\r\n\r\n\t<w*p>\t");
+			if (e > 0) {
+// console.log(buf.slice(0, e).toString());
+				b = true;
+				client.write(buf.slice(e + 11));
+			}
+		}
+// console.log(key + "-" + id + ": <<---- " + dat.length);
+	});
+	remoteProxy.on("error", function (e) {
+		remoteProxy.end();
+		client.end();
+// console.log(key + "-" + id + ": s - err");
+	});
+
+	remoteProxy.write(Buffer.concat([
+		new Buffer(remoteProxyFunHttps + key + "/" + id + streq + dat.length + "\r\n\r\n"),
+		dat
+	]));
 }
 
 // 开启服务
 net.createServer(function(client) {
-	var buf = Buffer.allocUnsafe(0);
+	var buf = new Buffer(0);
 
 	client.on("error", function () {});
 	client.on("data", function (dat) {
 		buf = Buffer.concat([buf, dat]);
-		var e = buf.indexOf("\r\n");
+		var e = buf.indexOf("\r\n\r\n");
 		if (e > 0) {
 			var req = parseReq(buf, e);
 			if (req === false) return;
@@ -166,17 +216,3 @@ net.createServer(function(client) {
 	});
 }).listen(srvPort, srvIp);
 console.log("间接代理启动 " + srvIp + ":" + srvPort);
-
-
-/*
-BUG :
-	1. http 返回的数据被打断，则自动结束，不再发送。
-	2. https 百度、谷歌 时无效。
-	以上两 bug 可能都是由于一次请求不能两次发送的原因。
-
-	3. openshift 访问控制机制：
-		一次请求 只能对应 一次应答，应答时的 Content-Length: 很重要，多于应答数则不接收请求，少于等于应答数则不再次应答。
-		若没有 Content-Length，则不再接受第二次请求，但能够无限应答。
-
-		解决对策：全部不回传 Content-Length 。https交互，每次都发送一个新的POST请求来处理。
-*/
