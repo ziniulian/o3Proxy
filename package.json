@@ -2,7 +2,9 @@
 	"name": "LZRproxy",
 	"version": "0.0.0",
 	"main": "index.js",
-	"dependencies": {},
+	"dependencies": {
+		"lzr": "~1.1.7"
+	},
 	"devDependencies": {},
 	"scripts": {
 		"start": "node index.js",
