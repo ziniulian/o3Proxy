@@ -9,7 +9,8 @@ LZR.load([
 ]);
 
 var srv = new LZR.Node.Srv.O3clientPoxSrv ({
-	srvHost: "127.0.0.1",
+	// srvHost: "127.0.0.1",
+	srvHost: "srv-lzrwebp.a3c1.starter-us-west-1.openshiftapps.com",
 	// showLog: true,
 	srvHttp: "POST /ptth",
 	srvHttps: "POST /ptths/"
